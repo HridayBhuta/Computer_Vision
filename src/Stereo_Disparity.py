@@ -1,15 +1,25 @@
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+import argparse
 
 def load_and_preprocess_images(left_image_path, right_image_path):
     left_img = cv2.imread(left_image_path, cv2.IMREAD_GRAYSCALE)
     right_img = cv2.imread(right_image_path, cv2.IMREAD_GRAYSCALE)
-    if left_img is None or right_img is None:
-        print("Image is not correctly loaded")
+    
+    if left_img is None:
+        raise FileNotFoundError(f"Could not load left image: {left_image_path}")
+    if right_img is None:
+        raise FileNotFoundError(f"Could not load right image: {right_image_path}")
+        
     return left_img, right_img
 
 def compute_disparity(left_img, right_img, disparity_range=64):
+    """
+    Computes disparity map using a naive block matching approach.
+    Note: This is a base implementation (O(N^3)) and is significantly 
+    slower than optimized methods like cv2.StereoBM.
+    """
     height, width = left_img.shape
     disparity_map = np.zeros_like(left_img, dtype=np.float32)
 
@@ -43,24 +53,23 @@ def apply_color_map(disparity_map):
     return colored_disparity_map
 
 def plot_disparity_map(colored_disparity_map):
-    plt.imshow(colored_disparity_map)
+    plt.imshow(cv2.cvtColor(colored_disparity_map, cv2.COLOR_BGR2RGB))
     plt.title('Disparity Map with Color')
     plt.axis('off')
     plt.show()
 
 if __name__ == '__main__':
-    import argparse
-
     parser = argparse.ArgumentParser(description='Generate a stereo disparity map from left and right images.')
-    parser.add_argument('--left_image', type=str, help='Path to the left image')
-    parser.add_argument('--right_image', type=str, help='Path to the right image')
+    parser.add_argument('left_image', type=str, help='Path to the left image')
+    parser.add_argument('right_image', type=str, help='Path to the right image')
     args = parser.parse_args()
 
-    left_img, right_img = load_and_preprocess_images(args.left_image, args.right_image)
-    disparity_map = compute_disparity(left_img, right_img, disparity_range=64)
-    smoothed_disparity_map = smooth_disparity_map(disparity_map, ksize=5)
-    colored_disparity_map = apply_color_map(smoothed_disparity_map)
-    plot_disparity_map(colored_disparity_map)
-
-
-# python Stereo_Disparity.py path_to_left_image.png path_to_right_image.png
+    try:
+        left_img, right_img = load_and_preprocess_images(args.left_image, args.right_image)
+        print("Computing disparity (this may take a moment)...")
+        disparity_map = compute_disparity(left_img, right_img, disparity_range=64)
+        smoothed_disparity_map = smooth_disparity_map(disparity_map, ksize=5)
+        colored_disparity_map = apply_color_map(smoothed_disparity_map)
+        plot_disparity_map(colored_disparity_map)
+    except Exception as e:
+        print(f"Error: {e}")

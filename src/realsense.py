@@ -4,168 +4,168 @@ import pyrealsense2 as rs
 import mediapipe as mp
 from pynput.mouse import Button, Controller
 from screeninfo import get_monitors
+import sys
 
-# --- Setup ---
-# MediaPipe Hand Landmarker
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+RES_X, RES_Y = 640, 480
+FPS = 30
 
-# pynput Mouse Controller
-mouse = Controller()
+SMOOTHING_FACTOR = 0.25
+FRAME_MARGIN = 0.15
 
-# Screen Info (for mapping coordinates)
-screen = get_monitors()[0]
-SCREEN_WIDTH, SCREEN_HEIGHT = screen.width, screen.height
-print(f"Screen dimensions: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+CLICK_TRIGGER_DIST = 0.06
+CLICK_RELEASE_DIST = 0.08
 
-# RealSense Pipeline
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-pipeline.start(config)
+class FingerMouse:
+    def __init__(self):
+        self.setup_mediapipe()
+        self.setup_mouse()
+        self.setup_realsense()
+        self.last_x, self.last_y = 0, 0
+        self.click_state = False
+        self.screen_w, self.screen_h = self.get_screen_dim()
 
-# Align depth to color stream
-align_to = rs.stream.color
-align = rs.align(align_to)
+    def get_screen_dim(self):
+        try:
+            monitor = get_monitors()[0]
+            print(f"Monitor Detected: {monitor.width}x{monitor.height}")
+            return monitor.width, monitor.height
+        except Exception:
+            print("Warning: Could not detect monitor. Defaulting to 1920x1080.")
+            return 1920, 1080
 
-# --- Mouse Control Configuration ---
-SMOOTHING_FACTOR = 0.2 # 0.0 = no smoothing, 1.0 = no movement
-last_mouse_x, last_mouse_y = 0, 0
-
-# --- Click Configuration ---
-is_clicking = False
-CLICK_DEPTH_THRESHOLD = 0.1 # 30 cm from camera
-# This state tracks if we are *in* a click (button is down)
-click_in_progress = False
-
-print("--- Finger Mouse & Click Started ---")
-print("Move your RIGHT index finger to control the mouse.")
-print(f"Push your finger closer than {CLICK_DEPTH_THRESHOLD}m to click.")
-print("Press ESC in the video window to quit.")
-
-try:
-    with mp_hands.Hands(
+    def setup_mediapipe(self):
+        self.mp_hands = mp.solutions.hands
+        self.mp_draw = mp.solutions.drawing_utils
+        self.hands = self.mp_hands.Hands(
             model_complexity=0,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-            max_num_hands=1) as hands: # Only track one hand for performance
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+
+    def setup_mouse(self):
+        self.mouse = Controller()
+
+    def setup_realsense(self):
+        print("Initializing RealSense Camera...")
+        try:
+            self.pipeline = rs.pipeline()
+            config = rs.config()
+            config.enable_stream(rs.stream.depth, RES_X, RES_Y, rs.format.z16, FPS)
+            config.enable_stream(rs.stream.color, RES_X, RES_Y, rs.format.bgr8, FPS)
+            
+            profile = self.pipeline.start(config)
+            
+            align_to = rs.stream.color
+            self.align = rs.align(align_to)
+            print("Camera started successfully.")
+        except Exception as e:
+            print(f"Error starting RealSense: {e}")
+            sys.exit(1)
+
+    def map_coords_to_screen(self, x_norm, y_norm):
+        """
+        Maps normalized camera coordinates (0.0-1.0) to screen coordinates.
+        Includes a 'margin' so you can reach screen edges easily.
+        """
+        x_clamped = np.clip(x_norm, FRAME_MARGIN, 1 - FRAME_MARGIN)
+        y_clamped = np.clip(y_norm, FRAME_MARGIN, 1 - FRAME_MARGIN)
         
-        while True:
-            # --- Get Frames ---
-            frames = pipeline.wait_for_frames()
-            aligned_frames = align.process(frames)
-            
-            depth_frame = aligned_frames.get_depth_frame()
-            color_frame = aligned_frames.get_color_frame()
-            
-            if not depth_frame or not color_frame:
-                continue
+        x_mapped = (x_clamped - FRAME_MARGIN) / (1 - 2 * FRAME_MARGIN)
+        y_mapped = (y_clamped - FRAME_MARGIN) / (1 - 2 * FRAME_MARGIN)
 
-            # --- Process Image ---
-            color_image = np.asanyarray(color_frame.get_data())
-            # Flip horizontally for a mirror view
-            color_image = cv2.flip(color_image, 1) 
-            
-            # Get image dimensions for pixel conversion
-            h, w, _ = color_image.shape
-            
-            # Convert BGR (OpenCV) to RGB (MediaPipe)
-            # We process the *flipped* image so coordinates match the mirror view
-            image_rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-            
-            results = hands.process(image_rgb)
+        screen_x = int(x_mapped * self.screen_w)
+        screen_y = int(y_mapped * self.screen_h)
+        return screen_x, screen_y
 
-            # --- Detect Hand and Move Mouse ---
-            if results.multi_hand_landmarks:
-                # We only care about the first hand detected
-                hand_landmarks = results.multi_hand_landmarks[0]
-                handedness = results.multi_handedness[0]
-                hand_type = handedness.classification[0].label
+    def draw_depth_bar(self, image, depth):
+        """Draws a visual indicator of finger depth and click threshold."""
+        h, w = image.shape[:2]
+        
+        bar_w, bar_h = 30, 200
+        x_start, y_start = w - 50, h // 2 - 100
+        
+        max_vis_depth = 0.20 
+        fill_ratio = 1.0 - np.clip(depth / max_vis_depth, 0, 1)
+        fill_h = int(fill_ratio * bar_h)
 
-                # Only control mouse with RIGHT hand
-                if hand_type == "Right":
-                    # --- Add text label for hand ---
-                    wrist_landmark = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
-                    text_x = int(wrist_landmark.x * w) - 30
-                    text_y = int(wrist_landmark.y * h) - 20
-                    cv2.putText(color_image, "Right Hand", 
-                                (text_x, text_y), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+        trigger_y = y_start + int((1 - CLICK_TRIGGER_DIST/max_vis_depth) * bar_h)
+        
+        color = (0, 255, 0) if self.click_state else (0, 0, 255)
 
-                    # Get Index Fingertip (landmark 8)
-                    tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-                    
-                    # --- 1. MOUSE POSITION (X, Y) ---
-                    
-                    # *** MIRRORING FIX: ***
-                    # We no longer invert the x-axis with (1 - tip.x)
-                    # Because the image fed to MediaPipe is already flipped,
-                    # tip.x (e.g., 0.9) now correctly means "right side of the screen".
-                    target_x = tip.x * SCREEN_WIDTH
-                    target_y = tip.y * SCREEN_HEIGHT
-                    
-                    # Apply smoothing
-                    mouse_x = (target_x * SMOOTHING_FACTOR) + (last_mouse_x * (1 - SMOOTHING_FACTOR))
-                    mouse_y = (target_y * SMOOTHING_FACTOR) + (last_mouse_y * (1 - SMOOTHING_FACTOR))
-                    
-                    mouse.position = (int(mouse_x), int(mouse_y))
-                    
-                    last_mouse_x, last_mouse_y = mouse_x, mouse_y
+        cv2.rectangle(image, (x_start, y_start), (x_start + bar_w, y_start + bar_h), (50, 50, 50), 2)
+        cv2.rectangle(image, (x_start, y_start + bar_h - fill_h), (x_start + bar_w, y_start + bar_h), color, -1)
+        cv2.line(image, (x_start - 5, trigger_y), (x_start + bar_w + 5, trigger_y), (0, 255, 255), 2)
+        cv2.putText(image, "Click", (x_start - 45, trigger_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-                    # --- 2. MOUSE CLICK (Z) ---
-                    # Get 3D (z) coordinate in meters
-                    # Convert normalized (x,y) to pixel (x,y)
-                    # We MUST use the *unflipped* x coordinate for the depth map
-                    unflipped_x = w - int(tip.x * w)
-                    pixel_y = int(tip.y * h)
+    def run(self):
+        print("\n--- Controls ---")
+        print("Point with RIGHT Index Finger.")
+        print(f"Push forward (<{CLICK_TRIGGER_DIST*100}cm) to CLICK.")
+        print(f"Pull back (>{CLICK_RELEASE_DIST*100}cm) to RELEASE.")
+        print("Press 'ESC' to quit.")
 
-                    current_z = 0.0
-                    # Check if pixel is valid before getting distance
-                    if 0 < unflipped_x < w and 0 < pixel_y < h:
-                        # Use the unflipped_x to sample the *original* depth frame
-                        current_z = depth_frame.get_distance(unflipped_x, pixel_y)
+        try:
+            while True:
+                frames = self.pipeline.wait_for_frames()
+                aligned_frames = self.align.process(frames)
+                
+                depth_frame = aligned_frames.get_depth_frame()
+                color_frame = aligned_frames.get_color_frame()
+                
+                if not depth_frame or not color_frame:
+                    continue
 
-                    # Check for a valid depth reading (not 0)
-                    if current_z > 0.0: 
-                        # If finger is "pushed" (closer than threshold)
-                        if current_z < CLICK_DEPTH_THRESHOLD:
-                            if not click_in_progress:
-                                print(f"CLICK PRESS (Depth: {current_z:.2f}m)")
-                                mouse.press(Button.left)
-                                click_in_progress = True
-                        # If finger is "pulled back" (father than threshold)
-                        elif current_z > CLICK_DEPTH_THRESHOLD:
-                            if click_in_progress:
-                                print(f"CLICK RELEASE (Depth: {current_z:.2f}m)")
-                                mouse.release(Button.left)
-                                click_in_progress = False
-                    # If depth reading is invalid (e.g., 0.0), release the click
-                    else:
-                        if click_in_progress:
-                            print("CLICK RELEASE (Depth Invalid)")
-                            mouse.release(Button.left)
-                            click_in_progress = False
+                bg_image = np.asanyarray(color_frame.get_data())
+                img_flipped = cv2.flip(bg_image, 1)
+                img_h, img_w, _ = img_flipped.shape
 
-                    # Draw landmarks on the image
-                    mp_drawing.draw_landmarks(
-                        color_image,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style())
+                img_rgb = cv2.cvtColor(img_flipped, cv2.COLOR_BGR2RGB)
+                results = self.hands.process(img_rgb)
 
-            # --- Show Video Feed ---
-            cv2.imshow('Index Finger Mouse - RealSense', color_image)
-            
-            if cv2.waitKey(5) & 0xFF == 27: # Press ESC to quit
-                break
+                if results.multi_hand_landmarks:
+                    for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                        
+                        if handedness.classification[0].label != "Right":
+                            continue
+                        tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+                        
+                        target_x, target_y = self.map_coords_to_screen(tip.x, tip.y)
+                        
+                        smooth_x = self.last_x + (target_x - self.last_x) * SMOOTHING_FACTOR
+                        smooth_y = self.last_y + (target_y - self.last_y) * SMOOTHING_FACTOR
+                        
+                        self.mouse.position = (int(smooth_x), int(smooth_y))
+                        self.last_x, self.last_y = smooth_x, smooth_y
 
-finally:
-    pipeline.stop()
-    cv2.destroyAllWindows()
-    # Failsafe: Make sure the mouse button is released when the app closes
-    if click_in_progress:
-        mouse.release(Button.left)
-    print("--- Index Finger Mouse Stopped ---")
+                        raw_x = int((1.0 - tip.x) * img_w)
+                        raw_y = int(tip.y * img_h)
+
+                        if 0 <= raw_x < img_w and 0 <= raw_y < img_h:
+                            dist = depth_frame.get_distance(raw_x, raw_y)
+                            
+                            if dist > 0:
+                                self.draw_depth_bar(img_flipped, dist)
+
+                                if not self.click_state and dist < CLICK_TRIGGER_DIST:
+                                    self.mouse.press(Button.left)
+                                    self.click_state = True
+                                    cv2.circle(img_flipped, (int(tip.x*img_w), int(tip.y*img_h)), 15, (0, 255, 0), -1)
+                                    
+                                elif self.click_state and dist > CLICK_RELEASE_DIST:
+                                    self.mouse.release(Button.left)
+                                    self.click_state = False
+
+                        self.mp_draw.draw_landmarks(img_flipped, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+
+                cv2.imshow('RealSense Finger Mouse', img_flipped)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+
+        finally:
+            self.pipeline.stop()
+            cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    app = FingerMouse()
+    app.run()
