@@ -31,7 +31,6 @@ Computer_Vision/
 │   └── stereo_disparity.py
 ├── pyproject.toml
 ├── .gitignore
-├── LICENSE
 └── README.md
 ```
 
@@ -158,20 +157,3 @@ This project was just for fun while I was tinkering with my depth camera
 - Morphological operations (opening/dilation) for noise removal
 - Binary masking for background replacement
 - Real-time background capture and averaging
-
-## Applications in Robotics
-
-These implementations were developed with Mars Rover navigation in mind:
-
-- **Optical Flow**: Terrain mapping and obstacle avoidance
-- **Stereo Vision**: Distance estimation and 3D scene reconstruction  
-- **Gesture Control**: This was just for fun while I was tinkering with my depth camera
-- **Real-time Processing**: Critical for autonomous navigation systems
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
